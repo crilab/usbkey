@@ -1,0 +1,207 @@
+#!/bin/python3
+
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+
+KEYFILE = '/root/usbkeys.json'
+KEYSIZE = 2048
+
+
+def keyfile_read() -> dict:
+    """ Read the content of keyfile """
+    with open(KEYFILE) as f:
+        return json.load(f)
+
+
+def keyfile_write(keys: dict):
+    """ Write keys to keyfile """
+    with open(KEYFILE, 'w') as f:
+        json.dump(keys, f)
+
+
+def error_exit(msg):
+    """ Exit the program with an error message """
+    print(f'ERROR: {msg}', file=sys.stderr)
+    exit(1)
+
+
+def subprocess_run_json(*args):
+    """ Run the command described by args. Stdout is captured and returned (parsed with JSON). """
+    p = subprocess.run(args, capture_output=True)
+    return json.loads(p.stdout)
+
+
+def verify_device_or_exit(device):
+    """ Returns if device qualifies as a key. Otherwise, exits the program with an appropriate error. """
+    lsblk = subprocess_run_json('lsblk', '--paths', '--json')
+
+    blockdevice = filter(lambda x: x['name'] == device, lsblk['blockdevices'])
+
+    try:
+        blockdevice = next(blockdevice)
+    except StopIteration:
+        error_exit(f'device {device} not found')
+
+    if blockdevice['type'] != 'disk':
+        error_exit(f'device {device} has type {blockdevice["type"]} (expecting disk)')
+
+    if blockdevice['mountpoint']:
+        error_exit(f'device {device} is mounted')
+
+    if 'children' in blockdevice:
+        for child in blockdevice['children']:
+            if child['mountpoint']:
+                error_exit(f'device {device} has mounted child ({child["name"]})')
+
+
+def generate_key(device, user):
+    key = secrets.token_bytes(KEYSIZE)
+    keys = keyfile_read()
+    keys[user] = key.hex()
+    keyfile_write(keys)
+    with open(device, 'wb') as f:
+        f.write(key)
+    print(f'SUCCESS: generated new key for user {user}')
+
+
+def operation_make(device, user):
+    verify_device_or_exit(device)
+    generate_key(device=device, user=user)
+
+
+def operation_list():
+    keys = keyfile_read()
+    print('USER')
+    print('*' * 4)
+    for user in keys:
+        print(user)
+
+
+def operation_delete(user):
+    keys = keyfile_read()
+    try:
+        del keys[user]
+    except KeyError:
+        error_exit(f'key not found for user {user}')
+    keyfile_write(keys)
+    print(f'SUCCESS: key deleted for user {user}')
+
+
+def operation_unlock(device):
+    try:
+        with open(device, 'rb') as f:
+            device_key = f.read(KEYSIZE).hex()
+    except FileNotFoundError:
+        error_exit(f'not found ({device})')
+
+    keys = keyfile_read()
+
+    for user in keys:
+        if secrets.compare_digest(device_key, keys[user]):
+            sessions = subprocess_run_json('loginctl', 'list-sessions', '--output=json')
+
+            if len(sessions) != 1:
+                error_exit(f'{len(sessions)} login sessions (expected 1)')
+
+            if sessions[0]['user'] == user:
+                if sessions[0]['session'] == '':  # just in case (should never happen)
+                    error_exit('empty login session')
+                generate_key(device=device, user=user)
+                print(f'SUCCESS: unlocking session for user {user}')
+                subprocess.run(['loginctl', 'unlock-session', sessions[0]['session']])
+            else:
+                error_exit(f'unsuccessful unlock (key_user={user}, login_user={sessions[0]["user"]})')
+            break
+    else:
+        error_exit(f'unauthorized device {device}')
+
+
+def main():
+    if os.geteuid() != 0:
+        error_exit('run as root')
+
+    parser = argparse.ArgumentParser(
+        description='Command line tool to utilize USB flash drives as keys to unlock the Gnome lock screen.'
+    )
+
+    subparser = parser.add_subparsers(required=True, dest='operation')
+
+    # MAKE #
+
+    parser_make = subparser.add_parser(
+        'make',
+        help='convert USB flash drive to key (warning)',
+        description='''Warning!
+        This operation erases all data on the device.
+        You will not be able to store any data on the device while using it as a key.'''
+    )
+
+    parser_make.add_argument(
+        '--device',
+        required=True,
+        help='device to be utilized as a key (warning above)'
+    )
+
+    parser_make.add_argument(
+        '--user',
+        required=True,
+        help='the user to associate the key'
+    )
+
+    # LIST #
+
+    subparser.add_parser(
+        'list',
+        help='list all users with active keys',
+        description='Lists all users with associated keys.'
+    )
+
+    # DELETE #
+
+    parser_delete = subparser.add_parser(
+        'delete',
+        help='delete key for user',
+        description='Disassociates a key from a user and deletes it.'
+    )
+
+    parser_delete.add_argument(
+        '--user',
+        required=True,
+        help='the user whose key will be deleted'
+    )
+
+    # UNLOCK #
+
+    parser_unlock = subparser.add_parser(
+        'unlock',
+        help='try unlocking screen with key',
+        description='''Checks if the device contains a valid key.
+        If so, unlocks the screen and updates the device with a new key for next unlock.'''
+    )
+
+    parser_unlock.add_argument(
+        '--device',
+        required=True,
+        help='the device to check for a key'
+    )
+
+    # PARSING OF ARGUMENTS #
+
+    args = parser.parse_args()
+
+    if args.operation == 'make':
+        operation_make(device=args.device, user=args.user)
+    elif args.operation == 'list':
+        operation_list()
+    elif args.operation == 'delete':
+        operation_delete(user=args.user)
+    elif args.operation == 'unlock':
+        operation_unlock(device=args.device)
+
+
+if __name__ == '__main__':
+    main()
