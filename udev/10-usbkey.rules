@@ -1,1 +1,1 @@
-ACTION=="add", SUBSYSTEM=="block", RUN+="usbkey unlock --device $devnode"
+ACTION=="add", SUBSYSTEM=="block", RUN+="/usr/local/sbin/usbkey unlock --device $devnode"
