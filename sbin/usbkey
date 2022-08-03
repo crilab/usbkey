@@ -6,6 +6,7 @@ import os
 import secrets
 import subprocess
 import sys
+import syslog
 
 KEYFILE = '/root/usbkeys.json'
 KEYSIZE = 2048
@@ -23,9 +24,20 @@ def keyfile_write(keys: dict):
         json.dump(keys, f)
 
 
-def error_exit(msg):
+def success(msg, log=False):
+    """ Print a success message to the screen and optionally send it to the system logger. """
+    msg = f'SUCCESS: {msg}'
+    print(msg)
+    if log:
+        syslog.syslog(msg)
+
+
+def error_exit(msg, log=False):
     """ Exit the program with an error message """
-    print(f'ERROR: {msg}', file=sys.stderr)
+    msg = f'ERROR: {msg}'
+    print(msg, file=sys.stderr)
+    if log:
+        syslog.syslog(msg)
     exit(1)
 
 
@@ -42,7 +54,7 @@ def generate_key(device, user):
     keyfile_write(keys)
     with open(device, 'wb') as f:
         f.write(key)
-    print(f'SUCCESS: generated new key for user {user}')
+    success(f'generated new key for user {user}', log=True)
 
 
 def operation_make(device, user):
@@ -84,7 +96,7 @@ def operation_delete(user):
     except KeyError:
         error_exit(f'key not found for user {user}')
     keyfile_write(keys)
-    print(f'SUCCESS: key deleted for user {user}')
+    success(f'key deleted for user {user}', log=True)
 
 
 def operation_unlock(device):
@@ -92,7 +104,7 @@ def operation_unlock(device):
         with open(device, 'rb') as f:
             device_key = f.read(KEYSIZE).hex()
     except FileNotFoundError:
-        error_exit(f'not found ({device})')
+        error_exit(f'device {device} not found during unlock', log=True)
 
     keys = keyfile_read()
 
@@ -101,19 +113,19 @@ def operation_unlock(device):
             sessions = subprocess_run_json('loginctl', 'list-sessions', '--output=json')
 
             if len(sessions) != 1:
-                error_exit(f'{len(sessions)} login sessions (expected 1)')
+                error_exit(f'{len(sessions)} login sessions (expected 1)', log=True)
 
             if sessions[0]['user'] == user:
                 if sessions[0]['session'] == '':  # just in case (should never happen)
-                    error_exit('empty login session')
+                    error_exit('empty login session', log=True)
                 generate_key(device=device, user=user)
-                print(f'SUCCESS: unlocking session for user {user}')
+                success(f'unlocking session for user {user} with device {device}', log=True)
                 subprocess.run(['loginctl', 'unlock-session', sessions[0]['session']])
             else:
-                error_exit(f'unsuccessful unlock (key_user={user}, login_user={sessions[0]["user"]})')
+                error_exit(f'refusing to unlock session for user {sessions[0]["user"]} with key belonging to user {user}', log=True)
             break
     else:
-        error_exit(f'unauthorized device {device}')
+        error_exit(f'no key found in device {device}', log=True)
 
 
 def main():
