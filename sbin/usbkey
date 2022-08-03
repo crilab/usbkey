@@ -35,8 +35,17 @@ def subprocess_run_json(*args):
     return json.loads(p.stdout)
 
 
-def verify_device_or_exit(device):
-    """ Returns if device qualifies as a key. Otherwise, exits the program with an appropriate error. """
+def generate_key(device, user):
+    key = secrets.token_bytes(KEYSIZE)
+    keys = keyfile_read()
+    keys[user] = key.hex()
+    keyfile_write(keys)
+    with open(device, 'wb') as f:
+        f.write(key)
+    print(f'SUCCESS: generated new key for user {user}')
+
+
+def operation_make(device, user):
     lsblk = subprocess_run_json('lsblk', '--paths', '--json')
 
     blockdevice = filter(lambda x: x['name'] == device, lsblk['blockdevices'])
@@ -57,19 +66,6 @@ def verify_device_or_exit(device):
             if child['mountpoint']:
                 error_exit(f'device {device} has mounted child ({child["name"]})')
 
-
-def generate_key(device, user):
-    key = secrets.token_bytes(KEYSIZE)
-    keys = keyfile_read()
-    keys[user] = key.hex()
-    keyfile_write(keys)
-    with open(device, 'wb') as f:
-        f.write(key)
-    print(f'SUCCESS: generated new key for user {user}')
-
-
-def operation_make(device, user):
-    verify_device_or_exit(device)
     generate_key(device=device, user=user)
 
 
